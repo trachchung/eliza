@@ -33,12 +33,18 @@ import {
     formatEvaluatorNames,
     formatEvaluatorExamples,
     RAGKnowledgeItem,
+    embed,
+    splitChunks,
 } from "@elizaos/core";
 import { TwitterPostClient } from "../../packages/client-twitter/src/post";
 import { names, uniqueNamesGenerator } from "unique-names-generator";
 import PostgresDatabaseAdapter from "@elizaos/adapter-postgres";
 import pg from "pg";
 import { v4 } from "uuid";
+
+interface RAGTweetKnowledgeItem extends RAGKnowledgeItem {
+    twitterName: string;
+}
 
 export async function createCustomRoutes(
     directClient: DirectClient,
@@ -114,16 +120,109 @@ export async function createCustomRoutes(
             connectionString: process.env.POSTGRES_URL,
         });
 
-        // Test the connection
+        // await createTweetKnowledge(pool, {
     };
 
     await bootstrapSmokeyRag();
+
+    // processCharacterRAGKnowledge() calls to createRAGTweetKnowledge
+    const createRAGTweetKnowledge = async (
+        pool: pg.Pool,
+        agent: AgentRuntime,
+        item: RAGTweetKnowledgeItem
+    ): Promise<void> => {
+        if (!item.content.text) {
+            elizaLogger.warn("Empty content in knowledge item");
+            return;
+        }
+
+        try {
+            function preprocess(content: string): string {
+                if (!content || typeof content !== "string") {
+                    elizaLogger.warn("Invalid input for preprocessing");
+                    return "";
+                }
+
+                return content
+                    .replace(/```[\s\S]*?```/g, "")
+                    .replace(/`.*?`/g, "")
+                    .replace(/#{1,6}\s*(.*)/g, "$1")
+                    .replace(/!\[(.*?)\]\(.*?\)/g, "$1")
+                    .replace(/\[(.*?)\]\(.*?\)/g, "$1")
+                    .replace(/(https?:\/\/)?(www\.)?([^\s]+\.[^\s]+)/g, "$3")
+                    .replace(/<@[!&]?\d+>/g, "")
+                    .replace(/<[^>]*>/g, "")
+                    .replace(/^\s*[-*_]{3,}\s*$/gm, "")
+                    .replace(/\/\*[\s\S]*?\*\//g, "")
+                    .replace(/\/\/.*/g, "")
+                    .replace(/\s+/g, " ")
+                    .replace(/\n{3,}/g, "\n\n")
+                    .replace(/[^a-zA-Z0-9\s\-_./:?=&]/g, "")
+                    .trim()
+                    .toLowerCase();
+            }
+
+            // Process main document
+            const processedContent = preprocess(item.content.text);
+            const mainEmbeddingArray = await embed(
+                this.runtime,
+                processedContent
+            );
+
+            const mainEmbedding = new Float32Array(mainEmbeddingArray);
+
+            // Create main document
+            await createTweetKnowledge(pool, {
+                id: item.id,
+                agentId: agent.agentId,
+                twitterName: item.twitterName,
+                content: {
+                    text: item.content.text,
+                    metadata: {
+                        ...item.content.metadata,
+                        isMain: true,
+                    },
+                },
+                embedding: mainEmbedding,
+                createdAt: Date.now(),
+            });
+
+            // Generate and store chunks
+            const chunks = await splitChunks(processedContent, 512, 20);
+
+            for (const [index, chunk] of chunks.entries()) {
+                const chunkEmbeddingArray = await embed(this.runtime, chunk);
+                const chunkEmbedding = new Float32Array(chunkEmbeddingArray);
+                const chunkId = `${item.id}-chunk-${index}` as UUID;
+
+                await createTweetKnowledge(pool, {
+                    id: chunkId,
+                    agentId: agent.agentId,
+                    twitterName: item.twitterName,
+                    content: {
+                        text: chunk,
+                        metadata: {
+                            ...item.content.metadata,
+                            isChunk: true,
+                            originalId: item.id,
+                            chunkIndex: index,
+                        },
+                    },
+                    embedding: chunkEmbedding,
+                    createdAt: Date.now(),
+                });
+            }
+        } catch (error) {
+            elizaLogger.error(`Error processing knowledge ${item.id}:`, error);
+            throw error;
+        }
+    };
 
     // Create a knowledge for tweet rag (to be used in the tweet generation)
     // A topic is searched in tweet knowledge to find a relevant tweets
     const createTweetKnowledge = async (
         pool: pg.Pool,
-        knowledge: RAGKnowledgeItem
+        knowledge: RAGTweetKnowledgeItem
     ): Promise<void> => {
         const client = await pool.connect();
         try {
@@ -140,6 +239,7 @@ export async function createCustomRoutes(
                     id: knowledge.id,
                     originalId: metadata.originalId,
                     agentId: metadata.isShared ? null : knowledge.agentId,
+                    twitterName: knowledge.twitterName,
                     content: knowledge.content,
                     embedding: knowledge.embedding,
                     chunkIndex: metadata.chunkIndex || 0,
@@ -150,15 +250,16 @@ export async function createCustomRoutes(
                 // This is a main knowledge item
                 await client.query(
                     `
-                            INSERT INTO knowledge (
-                                id, "agentId", content, embedding, "createdAt",
+                            INSERT INTO tweet_knowledge (
+                                id, "agentId", "twitterName", content, embedding, "createdAt",
                                 "isMain", "originalId", "chunkIndex", "isShared"
-                            ) VALUES ($1, $2, $3, $4, to_timestamp($5/1000.0), $6, $7, $8, $9)
+                            ) VALUES ($1, $2, $3, $4, $5, $to_timestamp($6/1000.0), $7, $8, $9)
                             ON CONFLICT (id) DO NOTHING
                         `,
                     [
                         knowledge.id,
                         metadata.isShared ? null : knowledge.agentId,
+                        knowledge.twitterName,
                         knowledge.content,
                         vectorStr,
                         knowledge.createdAt || Date.now(),
@@ -185,6 +286,7 @@ export async function createCustomRoutes(
             id: UUID;
             originalId: UUID;
             agentId: UUID | null;
+            twitterName: string;
             content: any;
             embedding: Float32Array | undefined | null;
             chunkIndex: number;
@@ -209,14 +311,15 @@ export async function createCustomRoutes(
         await pool.query(
             `
                 INSERT INTO knowledge (
-                    id, "agentId", content, embedding, "createdAt",
+                    id, "agentId", "twitterName", content, embedding, "createdAt",
                     "isMain", "originalId", "chunkIndex", "isShared"
-                ) VALUES ($1, $2, $3, $4, to_timestamp($5/1000.0), $6, $7, $8, $9)
+                ) VALUES ($1, $2, $3, $4, $5, $to_timestamp($6/1000.0), $7, $8, $9)
                 ON CONFLICT (id) DO NOTHING
             `,
             [
                 v4(), // Generate a proper UUID for PostgreSQL
                 params.agentId,
+                params.twitterName,
                 contentWithPatternId, // Store the pattern ID in metadata
                 vectorStr,
                 params.createdAt,
