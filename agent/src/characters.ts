@@ -40,7 +40,7 @@ const beraXBTCharacter: Character = {
     clients: [
         Clients.DIRECT,
         // Clients.TELEGRAM,
-        // Clients.TWITTER,
+        Clients.TWITTER,
     ],
     modelProvider: ModelProviderName.OPENROUTER,
     settings: {

@@ -152,6 +152,28 @@ BEGIN
         )', vector_dim);
 END $$;
 
+DO $$
+DECLARE
+    vector_dim INTEGER;
+BEGIN
+    vector_dim := get_embedding_dimension();
+
+    EXECUTE format('
+        CREATE TABLE IF NOT EXISTS tweet_knowledge (
+            "id" UUID PRIMARY KEY,
+            "agentId" UUID REFERENCES accounts("id"),
+            "twitterName" TEXT NOT NULL,
+            "content" JSONB NOT NULL,
+            "embedding" vector(%s),
+            "createdAt" TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+            "isMain" BOOLEAN DEFAULT FALSE,
+            "originalId" UUID REFERENCES knowledge("id"),
+            "chunkIndex" INTEGER,
+            "isShared" BOOLEAN DEFAULT FALSE,
+            CHECK(("isShared" = true AND "agentId" IS NULL) OR ("isShared" = false AND "agentId" IS NOT NULL))
+        )', vector_dim);
+END $$;
+
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_memories_embedding ON memories USING hnsw ("embedding" vector_cosine_ops);
 CREATE INDEX IF NOT EXISTS idx_memories_type_room ON memories("type", "roomId");
@@ -164,5 +186,12 @@ CREATE INDEX IF NOT EXISTS idx_knowledge_original ON knowledge("originalId");
 CREATE INDEX IF NOT EXISTS idx_knowledge_created ON knowledge("agentId", "createdAt");
 CREATE INDEX IF NOT EXISTS idx_knowledge_shared ON knowledge("isShared");
 CREATE INDEX IF NOT EXISTS idx_knowledge_embedding ON knowledge USING ivfflat (embedding vector_cosine_ops);
+CREATE INDEX IF NOT EXISTS idx_tweet_knowledge_agent ON tweet_knowledge("agentId");
+CREATE INDEX IF NOT EXISTS idx_tweet_knowledge_twitter_name ON tweet_knowledge("twitterName");
+CREATE INDEX IF NOT EXISTS idx_tweet_knowledge_agent_main ON tweet_knowledge("agentId", "isMain");
+CREATE INDEX IF NOT EXISTS idx_tweet_knowledge_original ON tweet_knowledge("originalId");
+CREATE INDEX IF NOT EXISTS idx_tweet_knowledge_created ON tweet_knowledge("agentId", "createdAt");
+CREATE INDEX IF NOT EXISTS idx_tweet_knowledge_shared ON tweet_knowledge("isShared");
+CREATE INDEX IF NOT EXISTS idx_tweet_knowledge_embedding ON tweet_knowledge USING ivfflat (embedding vector_cosine_ops);
 
 COMMIT;

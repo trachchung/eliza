@@ -6,6 +6,7 @@
     "scripts": {
         "start": "node --loader ts-node/esm src/index.ts",
         "dev": "node --loader ts-node/esm src/index.ts",
+        "generate-tweets": "node --loader ts-node/esm src/generate-tweets.ts",
         "check-types": "tsc --noEmit",
         "test": "jest"
     },
@@ -55,7 +56,7 @@
         "@elizaos/plugin-image-generation": "workspace:*",
         "@elizaos/plugin-movement": "workspace:*",
         "@elizaos/plugin-massa": "workspace:*",
-    "@elizaos/plugin-nft-generation": "workspace:*",
+        "@elizaos/plugin-nft-generation": "workspace:*",
         "@elizaos/plugin-node": "workspace:*",
         "@elizaos/plugin-solana": "workspace:*",
         "@elizaos/plugin-solana-agentkit": "workspace:*",

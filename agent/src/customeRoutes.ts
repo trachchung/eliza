@@ -32,10 +32,13 @@ import {
     formatEvaluators,
     formatEvaluatorNames,
     formatEvaluatorExamples,
+    RAGKnowledgeItem,
 } from "@elizaos/core";
-import { ClientBase } from "../../packages/client-twitter/src/base";
 import { TwitterPostClient } from "../../packages/client-twitter/src/post";
 import { names, uniqueNamesGenerator } from "unique-names-generator";
+import PostgresDatabaseAdapter from "@elizaos/adapter-postgres";
+import pg from "pg";
+import { v4 } from "uuid";
 
 export async function createCustomRoutes(
     directClient: DirectClient,
@@ -100,6 +103,130 @@ export async function createCustomRoutes(
         await twitterPostClient.generateNewTweet();
         res.json({ status: "success" });
     });
+
+    const bootstrapSmokeyRag = async () => {
+        elizaLogger.info("Initializing PostgreSQL connection...");
+        const pool = new pg.Pool({
+            // host: "localhost",
+            // user: "postgres",
+            // password: "password",
+            // database: "postgres",
+            connectionString: process.env.POSTGRES_URL,
+        });
+
+        // Test the connection
+    };
+
+    await bootstrapSmokeyRag();
+
+    // Create a knowledge for tweet rag (to be used in the tweet generation)
+    // A topic is searched in tweet knowledge to find a relevant tweets
+    const createTweetKnowledge = async (
+        pool: pg.Pool,
+        knowledge: RAGKnowledgeItem
+    ): Promise<void> => {
+        const client = await pool.connect();
+        try {
+            await client.query("BEGIN");
+
+            const metadata = knowledge.content.metadata || {};
+            const vectorStr = knowledge.embedding
+                ? `[${Array.from(knowledge.embedding).join(",")}]`
+                : null;
+
+            // If this is a chunk, use createKnowledgeChunk
+            if (metadata.isChunk && metadata.originalId) {
+                await createTweetKnowledgeChunk(pool, {
+                    id: knowledge.id,
+                    originalId: metadata.originalId,
+                    agentId: metadata.isShared ? null : knowledge.agentId,
+                    content: knowledge.content,
+                    embedding: knowledge.embedding,
+                    chunkIndex: metadata.chunkIndex || 0,
+                    isShared: metadata.isShared || false,
+                    createdAt: knowledge.createdAt || Date.now(),
+                });
+            } else {
+                // This is a main knowledge item
+                await client.query(
+                    `
+                            INSERT INTO knowledge (
+                                id, "agentId", content, embedding, "createdAt",
+                                "isMain", "originalId", "chunkIndex", "isShared"
+                            ) VALUES ($1, $2, $3, $4, to_timestamp($5/1000.0), $6, $7, $8, $9)
+                            ON CONFLICT (id) DO NOTHING
+                        `,
+                    [
+                        knowledge.id,
+                        metadata.isShared ? null : knowledge.agentId,
+                        knowledge.content,
+                        vectorStr,
+                        knowledge.createdAt || Date.now(),
+                        true,
+                        null,
+                        null,
+                        metadata.isShared || false,
+                    ]
+                );
+            }
+
+            await client.query("COMMIT");
+        } catch (error) {
+            await client.query("ROLLBACK");
+            throw error;
+        } finally {
+            client.release();
+        }
+    };
+
+    const createTweetKnowledgeChunk = async (
+        pool: pg.Pool,
+        params: {
+            id: UUID;
+            originalId: UUID;
+            agentId: UUID | null;
+            content: any;
+            embedding: Float32Array | undefined | null;
+            chunkIndex: number;
+            isShared: boolean;
+            createdAt: number;
+        }
+    ): Promise<void> => {
+        const vectorStr = params.embedding
+            ? `[${Array.from(params.embedding).join(",")}]`
+            : null;
+
+        // Store the pattern-based ID in the content metadata for compatibility
+        const patternId = `${params.originalId}-chunk-${params.chunkIndex}`;
+        const contentWithPatternId = {
+            ...params.content,
+            metadata: {
+                ...params.content.metadata,
+                patternId,
+            },
+        };
+
+        await pool.query(
+            `
+                INSERT INTO knowledge (
+                    id, "agentId", content, embedding, "createdAt",
+                    "isMain", "originalId", "chunkIndex", "isShared"
+                ) VALUES ($1, $2, $3, $4, to_timestamp($5/1000.0), $6, $7, $8, $9)
+                ON CONFLICT (id) DO NOTHING
+            `,
+            [
+                v4(), // Generate a proper UUID for PostgreSQL
+                params.agentId,
+                contentWithPatternId, // Store the pattern ID in metadata
+                vectorStr,
+                params.createdAt,
+                false,
+                params.originalId,
+                params.chunkIndex,
+                params.isShared,
+            ]
+        );
+    };
 
     let currentTopicIndex = 0;
 
@@ -233,7 +360,12 @@ export async function createCustomRoutes(
                 elizaLogger.info(
                     `Dry run: would have posted tweet: ${cleanedContent}`
                 );
-                res.json({ status: "success", tweet: cleanedContent });
+                res.json({
+                    status: "success",
+                    tweet: cleanedContent,
+                    topic: selectedTopic,
+                    prompt: context,
+                });
                 return;
             }
 
