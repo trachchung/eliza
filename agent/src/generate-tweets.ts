@@ -22,6 +22,7 @@ async function generateTweets(i: number, filePath: string) {
             { id: "tweet", title: "TWEET" },
             { id: "topic", title: "TOPIC" },
             { id: "prompt", title: "PROMPT" },
+            { id: "postExamples", title: "POST EXAMPLES" },
         ],
     });
 

@@ -598,21 +598,21 @@ export async function createCustomRoutes(
             // round-robin through topics
 
             // customize topics
-            // const topics = [
-            //     "Introduction to SolvBTC.BERA\nReward Layers of SolvBTC.BERA\nDeposit Lock Period\nReward Distribution Mechanism\nInformation on the 90-day lock period for deposits starting from Berachain mainnet launch.\nThe specific assets (SolvBTC.BBN, SolvBTC, WBTC, cbBTC) that can be deposited into SolvBTC.BERA.",
-            //     "Leverage opportunities on Berachain through Hourglass.\n\nThe concept of using LBTC for leverage within DeFi.\n\nMention of the upcoming ebtc on Berachain.\n\nThe strategic advantage of Hourglass in the Berachain ecosystem.\n\nDetails on earning through Hourglass Points and other rewards.\n\nThe role of Concrete points in the leverage system.",
-            //     "User Benefits from ctUSDe and ctsUSDe\nPhase 1 Rewards\nPhase 2 Rewards Post-Boyco Launch\nYield Structure for ctUSDe and ctsUSDe\nApplicability of Yield and Points\nRedemption Timeline",
-            //     "Overview of the Bera Launch Series\nIntroduction to New Pools\nLaunch Date for liquidBera Pools\nPurpose of liquidBera Pools\nCollaborators in the Bera Launch Series\nEngagement with Bera Market\nLiquid Staking Dynamics",
-            //     "Introduction to CIAN's PreDeposit Vault\nCIAN's Partnerships\nAdvantages of Using CIAN for Yield Optimization\nUnique Features of CIAN's PreDeposit Vault\nCIAN's Yield Structure\nInnovative Aspects of CIAN's Vault\nStablecoin Innovations by CIAN\nGetting Started with CIAN for Cross-Chain Yields",
-            //     "Introduction to Berachain Vault\nMaximizing DeFi Exposure\nFunctionality of Intent Adapter by Router Protocol\nAcquiring beraSBTC on Ethereum Mainnet\nChecking Balance and Rewards\nBenefits of Holding beraSBTC\nParticipation in the Berachain Vault\nAdding beraSBTC to Wallet\nSupported Chains for beraSBTC",
-            // ];
-            // const selectedTopic = topics[currentTopicIndex];
-            // currentTopicIndex = (currentTopicIndex + 1) % topics.length;
+            const topics = [
+                "Introduction to SolvBTC.BERA\nReward Layers of SolvBTC.BERA\nDeposit Lock Period\nReward Distribution Mechanism\nInformation on the 90-day lock period for deposits starting from Berachain mainnet launch.\nThe specific assets (SolvBTC.BBN, SolvBTC, WBTC, cbBTC) that can be deposited into SolvBTC.BERA.",
+                "Leverage opportunities on Berachain through Hourglass.\n\nThe concept of using LBTC for leverage within DeFi.\n\nMention of the upcoming ebtc on Berachain.\n\nThe strategic advantage of Hourglass in the Berachain ecosystem.\n\nDetails on earning through Hourglass Points and other rewards.\n\nThe role of Concrete points in the leverage system.",
+                "User Benefits from ctUSDe and ctsUSDe\nPhase 1 Rewards\nPhase 2 Rewards Post-Boyco Launch\nYield Structure for ctUSDe and ctsUSDe\nApplicability of Yield and Points\nRedemption Timeline",
+                "Overview of the Bera Launch Series\nIntroduction to New Pools\nLaunch Date for liquidBera Pools\nPurpose of liquidBera Pools\nCollaborators in the Bera Launch Series\nEngagement with Bera Market\nLiquid Staking Dynamics",
+                "Introduction to CIAN's PreDeposit Vault\nCIAN's Partnerships\nAdvantages of Using CIAN for Yield Optimization\nUnique Features of CIAN's PreDeposit Vault\nCIAN's Yield Structure\nInnovative Aspects of CIAN's Vault\nStablecoin Innovations by CIAN\nGetting Started with CIAN for Cross-Chain Yields",
+                "Introduction to Berachain Vault\nMaximizing DeFi Exposure\nFunctionality of Intent Adapter by Router Protocol\nAcquiring beraSBTC on Ethereum Mainnet\nChecking Balance and Rewards\nBenefits of Holding beraSBTC\nParticipation in the Berachain Vault\nAdding beraSBTC to Wallet\nSupported Chains for beraSBTC",
+            ];
+            const selectedTopic = topics[currentTopicIndex];
+            currentTopicIndex = (currentTopicIndex + 1) % topics.length;
 
             // topics from character
-            const selectedTopic = agent.character.topics[currentTopicIndex];
-            currentTopicIndex =
-                (currentTopicIndex + 1) % agent.character.topics.length;
+            // const selectedTopic = agent.character.topics[currentTopicIndex];
+            // currentTopicIndex =
+            //     (currentTopicIndex + 1) % agent.character.topics.length;
 
             if (!selectedTopic?.length) {
                 elizaLogger.error("No topics found");
@@ -632,8 +632,8 @@ export async function createCustomRoutes(
             const results = await searchRagTweetKnowledge(pool, {
                 agentId: agent.agentId,
                 embedding: new Float32Array(embedding),
-                match_threshold: 0.3,
-                match_count: 10,
+                match_threshold: 0.2,
+                match_count: 5,
                 searchText: processedTopic,
             });
 
