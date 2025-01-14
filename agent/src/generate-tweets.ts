@@ -42,6 +42,6 @@ async function generateTweets(i: number, filePath: string) {
 
 // Example usage
 generateTweets(
-    30,
+    24,
     "/home/charlie/Desktop/eliza/agent/generated-demo-tweets.csv"
 );

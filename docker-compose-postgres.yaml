@@ -1,0 +1,21 @@
+version: "3"
+
+# POSTGRES_URL=postgresql://aismokey:aismokey@localhost:5432/aismokey
+#  docker compose -f docker-compose-postgres.yaml up -d
+services:
+    postgresql:
+        image: pgvector/pgvector:pg17
+        container_name: aismokey-pgvector
+        restart: always
+        volumes:
+            - pgvector:/var/lib/postgresql/data
+        ports:
+            - 5432:5432
+        environment:
+            - POSTGRES_DB=aismokey
+            - POSTGRES_USER=aismokey
+            - POSTGRES_PASSWORD=aismokey
+
+volumes:
+    pgvector:
+        driver: local

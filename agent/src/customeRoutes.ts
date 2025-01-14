@@ -41,6 +41,7 @@ import { names, uniqueNamesGenerator } from "unique-names-generator";
 import PostgresDatabaseAdapter from "@elizaos/adapter-postgres";
 import pg from "pg";
 import { v4 } from "uuid";
+import { getRawBlockTransactions } from "viem/zksync";
 
 interface RAGTweetKnowledgeItem extends RAGKnowledgeItem {
     twitterName: string;
@@ -110,25 +111,145 @@ export async function createCustomRoutes(
         res.json({ status: "success" });
     });
 
-    const bootstrapSmokeyRag = async () => {
-        elizaLogger.info("Initializing PostgreSQL connection...");
-        const pool = new pg.Pool({
-            // host: "localhost",
-            // user: "postgres",
-            // password: "password",
-            // database: "postgres",
-            connectionString: process.env.POSTGRES_URL,
-        });
+    const getRagTweetKnowledge = async (
+        pool: pg.Pool,
+        params: {
+            id?: UUID;
+            agentId: UUID;
+            limit?: number;
+            query?: string;
+        }
+    ): Promise<RAGKnowledgeItem[]> => {
+        try {
+            let sql = `SELECT * FROM knowledge WHERE ("agentId" = $1 OR "isShared" = true)`;
+            const queryParams: any[] = [params.agentId];
+            let paramCount = 1;
 
-        // await createTweetKnowledge(pool, {
+            if (params.id) {
+                paramCount++;
+                sql += ` AND id = $${paramCount}`;
+                queryParams.push(params.id);
+            }
+
+            if (params.limit) {
+                paramCount++;
+                sql += ` LIMIT $${paramCount}`;
+                queryParams.push(params.limit);
+            }
+
+            const { rows } = await pool.query(sql, queryParams);
+
+            return rows.map((row) => ({
+                id: row.id,
+                agentId: row.agentId,
+                content:
+                    typeof row.content === "string"
+                        ? JSON.parse(row.content)
+                        : row.content,
+                embedding: row.embedding
+                    ? new Float32Array(row.embedding)
+                    : undefined,
+                createdAt: row.createdAt.getTime(),
+            }));
+        } catch (error) {
+            elizaLogger.error("Error fetching knowledge:", error);
+            throw error;
+        }
     };
 
-    await bootstrapSmokeyRag();
+    const searchRagTweetKnowledge = async (
+        pool: pg.Pool,
+        params: {
+            agentId: UUID;
+            embedding: Float32Array;
+            match_threshold: number;
+            match_count: number;
+            searchText?: string;
+        }
+    ): Promise<RAGKnowledgeItem[]> => {
+        // const cacheKey = `embedding_${params.agentId}_${params.searchText}`;
+        // const cachedResult = await pool.getCache({
+        //     key: cacheKey,
+        //     agentId: params.agentId,
+        // });
 
-    // processCharacterRAGKnowledge() calls to createRAGTweetKnowledge
+        // if (cachedResult) {
+        //     return JSON.parse(cachedResult);
+        // }
+
+        const vectorStr = `[${Array.from(params.embedding).join(",")}]`;
+
+        const sql = `
+                    WITH vector_scores AS (
+                        SELECT id,
+                            1 - (embedding <-> $1::vector) as vector_score
+                        FROM knowledge
+                        WHERE ("agentId" IS NULL AND "isShared" = true) OR "agentId" = $2
+                        AND embedding IS NOT NULL
+                    ),
+                    keyword_matches AS (
+                        SELECT id,
+                        CASE
+                            WHEN content->>'text' ILIKE $3 THEN 3.0
+                            ELSE 1.0
+                        END *
+                        CASE
+                            WHEN (content->'metadata'->>'isChunk')::boolean = true THEN 1.5
+                            WHEN (content->'metadata'->>'isMain')::boolean = true THEN 1.2
+                            ELSE 1.0
+                        END as keyword_score
+                        FROM knowledge
+                        WHERE ("agentId" IS NULL AND "isShared" = true) OR "agentId" = $2
+                    )
+                    SELECT k.*,
+                        v.vector_score,
+                        kw.keyword_score,
+                        (v.vector_score * kw.keyword_score) as combined_score
+                    FROM knowledge k
+                    JOIN vector_scores v ON k.id = v.id
+                    LEFT JOIN keyword_matches kw ON k.id = kw.id
+                    WHERE ("agentId" IS NULL AND "isShared" = true) OR k."agentId" = $2
+                    AND (
+                        v.vector_score >= $4
+                        OR (kw.keyword_score > 1.0 AND v.vector_score >= 0.3)
+                    )
+                    ORDER BY combined_score DESC
+                    LIMIT $5
+                `;
+
+        const { rows } = await pool.query(sql, [
+            vectorStr,
+            params.agentId,
+            `%${params.searchText || ""}%`,
+            params.match_threshold,
+            params.match_count,
+        ]);
+
+        const results = rows.map((row) => ({
+            id: row.id,
+            agentId: row.agentId,
+            content:
+                typeof row.content === "string"
+                    ? JSON.parse(row.content)
+                    : row.content,
+            embedding: row.embedding
+                ? new Float32Array(row.embedding)
+                : undefined,
+            createdAt: row.createdAt.getTime(),
+            similarity: row.combined_score,
+        }));
+
+        // await this.setCache({
+        //     key: cacheKey,
+        //     agentId: params.agentId,
+        //     value: JSON.stringify(results),
+        // });
+
+        return results;
+    };
+
     const createRAGTweetKnowledge = async (
         pool: pg.Pool,
-        agent: AgentRuntime,
         item: RAGTweetKnowledgeItem
     ): Promise<void> => {
         if (!item.content.text) {
@@ -164,14 +285,12 @@ export async function createCustomRoutes(
 
             // Process main document
             const processedContent = preprocess(item.content.text);
-            const mainEmbeddingArray = await embed(
-                this.runtime,
-                processedContent
-            );
+            const mainEmbeddingArray = await embed(agent, processedContent);
 
             const mainEmbedding = new Float32Array(mainEmbeddingArray);
 
             // Create main document
+            console.log("Abc");
             await createTweetKnowledge(pool, {
                 id: item.id,
                 agentId: agent.agentId,
@@ -189,9 +308,10 @@ export async function createCustomRoutes(
 
             // Generate and store chunks
             const chunks = await splitChunks(processedContent, 512, 20);
+            console.log("123");
 
             for (const [index, chunk] of chunks.entries()) {
-                const chunkEmbeddingArray = await embed(this.runtime, chunk);
+                const chunkEmbeddingArray = await embed(agent, chunk);
                 const chunkEmbedding = new Float32Array(chunkEmbeddingArray);
                 const chunkId = `${item.id}-chunk-${index}` as UUID;
 
@@ -235,6 +355,8 @@ export async function createCustomRoutes(
 
             // If this is a chunk, use createKnowledgeChunk
             if (metadata.isChunk && metadata.originalId) {
+                console.log("Creating chunk");
+
                 await createTweetKnowledgeChunk(pool, {
                     id: knowledge.id,
                     originalId: metadata.originalId,
@@ -253,7 +375,7 @@ export async function createCustomRoutes(
                             INSERT INTO tweet_knowledge (
                                 id, "agentId", "twitterName", content, embedding, "createdAt",
                                 "isMain", "originalId", "chunkIndex", "isShared"
-                            ) VALUES ($1, $2, $3, $4, $5, $to_timestamp($6/1000.0), $7, $8, $9)
+                            ) VALUES ($1, $2, $3, $4, $5, to_timestamp($6/1000.0), $7, $8, $9, $10)
                             ON CONFLICT (id) DO NOTHING
                         `,
                     [
@@ -294,42 +416,98 @@ export async function createCustomRoutes(
             createdAt: number;
         }
     ): Promise<void> => {
-        const vectorStr = params.embedding
-            ? `[${Array.from(params.embedding).join(",")}]`
-            : null;
+        try {
+            const vectorStr = params.embedding
+                ? `[${Array.from(params.embedding).join(",")}]`
+                : null;
 
-        // Store the pattern-based ID in the content metadata for compatibility
-        const patternId = `${params.originalId}-chunk-${params.chunkIndex}`;
-        const contentWithPatternId = {
-            ...params.content,
-            metadata: {
-                ...params.content.metadata,
-                patternId,
-            },
-        };
+            // Store the pattern-based ID in the content metadata for compatibility
+            const patternId = `${params.originalId}-chunk-${params.chunkIndex}`;
+            const contentWithPatternId = {
+                ...params.content,
+                metadata: {
+                    ...params.content.metadata,
+                    patternId,
+                },
+            };
 
-        await pool.query(
-            `
-                INSERT INTO knowledge (
+            await pool.query(
+                `
+                INSERT INTO tweet_knowledge (
                     id, "agentId", "twitterName", content, embedding, "createdAt",
                     "isMain", "originalId", "chunkIndex", "isShared"
-                ) VALUES ($1, $2, $3, $4, $5, $to_timestamp($6/1000.0), $7, $8, $9)
+                ) VALUES ($1, $2, $3, $4, $5, to_timestamp($6/1000.0), $7, $8, $9, $10)
                 ON CONFLICT (id) DO NOTHING
             `,
-            [
-                v4(), // Generate a proper UUID for PostgreSQL
-                params.agentId,
-                params.twitterName,
-                contentWithPatternId, // Store the pattern ID in metadata
-                vectorStr,
-                params.createdAt,
-                false,
-                params.originalId,
-                params.chunkIndex,
-                params.isShared,
-            ]
-        );
+                [
+                    v4(), // Generate a proper UUID for PostgreSQL
+                    params.agentId,
+                    params.twitterName,
+                    contentWithPatternId, // Store the pattern ID in metadata
+                    vectorStr,
+                    params.createdAt,
+                    false,
+                    params.originalId,
+                    params.chunkIndex,
+                    params.isShared,
+                ]
+            );
+        } catch (error) {
+            elizaLogger.error(
+                `Error creating knowledge chunk ${params.id}:`,
+                error
+            );
+            throw error;
+        }
     };
+
+    const bootstrapSmokeyRag = async () => {
+        try {
+            elizaLogger.info("Initializing PostgreSQL connection...");
+            const twitterName = "smokeythebera";
+            const pool = new pg.Pool({
+                // host: "localhost",
+                // user: "postgres",
+                // password: "password",
+                // database: "postgres",
+                connectionString: process.env.POSTGRES_URL,
+            });
+
+            const item = "Hello world ooga booga";
+
+            const knowledgeId = stringToUuid(item);
+
+            console.log("Getting knowedge ", knowledgeId);
+            const existingKnowledge = await getRagTweetKnowledge(pool, {
+                agentId: agent.agentId,
+                id: knowledgeId,
+            });
+            console.log("Existing knowledge ", existingKnowledge);
+
+            if (existingKnowledge.length > 0) {
+                elizaLogger.info(
+                    `Direct knowledge ${knowledgeId} already exists, skipping`
+                );
+            }
+
+            console.log("Creating knowledge ", knowledgeId);
+            await createRAGTweetKnowledge(pool, {
+                id: knowledgeId,
+                agentId: agent.agentId,
+                twitterName: twitterName,
+                content: {
+                    text: item,
+                    metadata: {
+                        type: "direct",
+                    },
+                },
+            });
+        } catch (error) {
+            elizaLogger.error("Error bootstraping tweet knowledge:", error);
+        }
+    };
+
+    // await bootstrapSmokeyRag();
 
     let currentTopicIndex = 0;
 
@@ -342,12 +520,14 @@ export async function createCustomRoutes(
             if (!twitterPostClient?.client) {
                 elizaLogger.error("No twitter client found");
                 res.status(500).json({ error: "No twitter client found" });
+                return;
             }
             const twitterClient = twitterPostClient.client;
 
             if (!twitterClient?.profile?.username) {
                 elizaLogger.error("No twitter username found");
                 res.status(500).json({ error: "No twitter username found" });
+                return;
             }
 
             const roomId = stringToUuid(
@@ -363,6 +543,20 @@ export async function createCustomRoutes(
 
             // const topics = agent.character.topics.join(", ");
             // round-robin through topics
+
+            // customize topics
+            // const topics = [
+            //     "Introduction to SolvBTC.BERA\nReward Layers of SolvBTC.BERA\nDeposit Lock Period\nReward Distribution Mechanism\nInformation on the 90-day lock period for deposits starting from Berachain mainnet launch.\nThe specific assets (SolvBTC.BBN, SolvBTC, WBTC, cbBTC) that can be deposited into SolvBTC.BERA.",
+            //     "Leverage opportunities on Berachain through Hourglass.\n\nThe concept of using LBTC for leverage within DeFi.\n\nMention of the upcoming ebtc on Berachain.\n\nThe strategic advantage of Hourglass in the Berachain ecosystem.\n\nDetails on earning through Hourglass Points and other rewards.\n\nThe role of Concrete points in the leverage system.",
+            //     "User Benefits from ctUSDe and ctsUSDe\nPhase 1 Rewards\nPhase 2 Rewards Post-Boyco Launch\nYield Structure for ctUSDe and ctsUSDe\nApplicability of Yield and Points\nRedemption Timeline",
+            //     "Overview of the Bera Launch Series\nIntroduction to New Pools\nLaunch Date for liquidBera Pools\nPurpose of liquidBera Pools\nCollaborators in the Bera Launch Series\nEngagement with Bera Market\nLiquid Staking Dynamics",
+            //     "Introduction to CIAN's PreDeposit Vault\nCIAN's Partnerships\nAdvantages of Using CIAN for Yield Optimization\nUnique Features of CIAN's PreDeposit Vault\nCIAN's Yield Structure\nInnovative Aspects of CIAN's Vault\nStablecoin Innovations by CIAN\nGetting Started with CIAN for Cross-Chain Yields",
+            //     "Introduction to Berachain Vault\nMaximizing DeFi Exposure\nFunctionality of Intent Adapter by Router Protocol\nAcquiring beraSBTC on Ethereum Mainnet\nChecking Balance and Rewards\nBenefits of Holding beraSBTC\nParticipation in the Berachain Vault\nAdding beraSBTC to Wallet\nSupported Chains for beraSBTC",
+            // ];
+            // const selectedTopic = topics[currentTopicIndex];
+            // currentTopicIndex = (currentTopicIndex + 1) % topics.length;
+
+            // topics from character
             const selectedTopic = agent.character.topics[currentTopicIndex];
             currentTopicIndex =
                 (currentTopicIndex + 1) % agent.character.topics.length;
@@ -370,6 +564,7 @@ export async function createCustomRoutes(
             if (!selectedTopic?.length) {
                 elizaLogger.error("No topics found");
                 res.status(500).json({ error: "No topics found" });
+                return;
             }
 
             const state = await composeState(
@@ -392,6 +587,7 @@ export async function createCustomRoutes(
             if (!agent.character.templates?.twitterPostTemplate) {
                 elizaLogger.error("No twitterPostTemplate found in character");
                 res.status(500).json({ error: "No twitterPostTemplate found" });
+                return;
             }
 
             const context = composeContext({
@@ -440,6 +636,7 @@ export async function createCustomRoutes(
                 res.status(500).json({
                     error: "Failed to extract valid content from response",
                 });
+                return;
             }
 
             // Truncate the content to the maximum tweet length specified in the environment settings, ensuring the truncation respects sentence boundaries.
