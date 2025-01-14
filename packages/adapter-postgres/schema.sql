@@ -10,6 +10,7 @@
 -- DROP TABLE IF EXISTS rooms CASCADE;
 -- DROP TABLE IF EXISTS accounts CASCADE;
 -- DROP TABLE IF EXISTS knowledge CASCADE;
+-- DROP TABLE IF EXISTS tweet_knowledge CASCADE;
 
 
 CREATE EXTENSION IF NOT EXISTS vector;
@@ -167,7 +168,7 @@ BEGIN
             "embedding" vector(%s),
             "createdAt" TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
             "isMain" BOOLEAN DEFAULT FALSE,
-            "originalId" UUID REFERENCES knowledge("id"),
+            "originalId" UUID REFERENCES tweet_knowledge("id"),
             "chunkIndex" INTEGER,
             "isShared" BOOLEAN DEFAULT FALSE,
             CHECK(("isShared" = true AND "agentId" IS NULL) OR ("isShared" = false AND "agentId" IS NOT NULL))

@@ -41,7 +41,7 @@ import { names, uniqueNamesGenerator } from "unique-names-generator";
 import PostgresDatabaseAdapter from "@elizaos/adapter-postgres";
 import pg from "pg";
 import { v4 } from "uuid";
-import { getRawBlockTransactions } from "viem/zksync";
+import { readFileSync } from "fs";
 
 interface RAGTweetKnowledgeItem extends RAGKnowledgeItem {
     twitterName: string;
@@ -83,12 +83,7 @@ export async function createCustomRoutes(
                 " - ",
                 text.slice(0, 100)
             );
-            console.log({
-                id: knowledgeId,
-                content: {
-                    text: text,
-                },
-            });
+
             await knowledge.set(agent, {
                 id: knowledgeId,
                 content: {
@@ -121,7 +116,7 @@ export async function createCustomRoutes(
         }
     ): Promise<RAGKnowledgeItem[]> => {
         try {
-            let sql = `SELECT * FROM knowledge WHERE ("agentId" = $1 OR "isShared" = true)`;
+            let sql = `SELECT * FROM tweet_knowledge WHERE ("agentId" = $1 OR "isShared" = true)`;
             const queryParams: any[] = [params.agentId];
             let paramCount = 1;
 
@@ -183,7 +178,7 @@ export async function createCustomRoutes(
                     WITH vector_scores AS (
                         SELECT id,
                             1 - (embedding <-> $1::vector) as vector_score
-                        FROM knowledge
+                        FROM tweet_knowledge
                         WHERE ("agentId" IS NULL AND "isShared" = true) OR "agentId" = $2
                         AND embedding IS NOT NULL
                     ),
@@ -198,14 +193,14 @@ export async function createCustomRoutes(
                             WHEN (content->'metadata'->>'isMain')::boolean = true THEN 1.2
                             ELSE 1.0
                         END as keyword_score
-                        FROM knowledge
+                        FROM tweet_knowledge
                         WHERE ("agentId" IS NULL AND "isShared" = true) OR "agentId" = $2
                     )
                     SELECT k.*,
                         v.vector_score,
                         kw.keyword_score,
                         (v.vector_score * kw.keyword_score) as combined_score
-                    FROM knowledge k
+                    FROM tweet_knowledge k
                     JOIN vector_scores v ON k.id = v.id
                     LEFT JOIN keyword_matches kw ON k.id = kw.id
                     WHERE ("agentId" IS NULL AND "isShared" = true) OR k."agentId" = $2
@@ -258,31 +253,6 @@ export async function createCustomRoutes(
         }
 
         try {
-            function preprocess(content: string): string {
-                if (!content || typeof content !== "string") {
-                    elizaLogger.warn("Invalid input for preprocessing");
-                    return "";
-                }
-
-                return content
-                    .replace(/```[\s\S]*?```/g, "")
-                    .replace(/`.*?`/g, "")
-                    .replace(/#{1,6}\s*(.*)/g, "$1")
-                    .replace(/!\[(.*?)\]\(.*?\)/g, "$1")
-                    .replace(/\[(.*?)\]\(.*?\)/g, "$1")
-                    .replace(/(https?:\/\/)?(www\.)?([^\s]+\.[^\s]+)/g, "$3")
-                    .replace(/<@[!&]?\d+>/g, "")
-                    .replace(/<[^>]*>/g, "")
-                    .replace(/^\s*[-*_]{3,}\s*$/gm, "")
-                    .replace(/\/\*[\s\S]*?\*\//g, "")
-                    .replace(/\/\/.*/g, "")
-                    .replace(/\s+/g, " ")
-                    .replace(/\n{3,}/g, "\n\n")
-                    .replace(/[^a-zA-Z0-9\s\-_./:?=&]/g, "")
-                    .trim()
-                    .toLowerCase();
-            }
-
             // Process main document
             const processedContent = preprocess(item.content.text);
             const mainEmbeddingArray = await embed(agent, processedContent);
@@ -290,7 +260,6 @@ export async function createCustomRoutes(
             const mainEmbedding = new Float32Array(mainEmbeddingArray);
 
             // Create main document
-            console.log("Abc");
             await createTweetKnowledge(pool, {
                 id: item.id,
                 agentId: agent.agentId,
@@ -308,7 +277,6 @@ export async function createCustomRoutes(
 
             // Generate and store chunks
             const chunks = await splitChunks(processedContent, 512, 20);
-            console.log("123");
 
             for (const [index, chunk] of chunks.entries()) {
                 const chunkEmbeddingArray = await embed(agent, chunk);
@@ -355,8 +323,6 @@ export async function createCustomRoutes(
 
             // If this is a chunk, use createKnowledgeChunk
             if (metadata.isChunk && metadata.originalId) {
-                console.log("Creating chunk");
-
                 await createTweetKnowledgeChunk(pool, {
                     id: knowledge.id,
                     originalId: metadata.originalId,
@@ -473,41 +439,128 @@ export async function createCustomRoutes(
                 connectionString: process.env.POSTGRES_URL,
             });
 
-            const item = "Hello world ooga booga";
+            const tweets = (
+                JSON.parse(
+                    readFileSync(
+                        "src/persona/smokeythebera/tweets.json",
+                        "utf-8"
+                    )
+                ) as { text: string }[]
+            ).map((tweet) => tweet.text);
 
-            const knowledgeId = stringToUuid(item);
+            for (const item of tweets) {
+                const knowledgeId = stringToUuid(item);
 
-            console.log("Getting knowedge ", knowledgeId);
-            const existingKnowledge = await getRagTweetKnowledge(pool, {
-                agentId: agent.agentId,
-                id: knowledgeId,
-            });
-            console.log("Existing knowledge ", existingKnowledge);
+                const existingKnowledge = await getRagTweetKnowledge(pool, {
+                    agentId: agent.agentId,
+                    id: knowledgeId,
+                });
 
-            if (existingKnowledge.length > 0) {
-                elizaLogger.info(
-                    `Direct knowledge ${knowledgeId} already exists, skipping`
-                );
-            }
+                if (existingKnowledge.length > 0) {
+                    elizaLogger.info(
+                        `Direct knowledge ${knowledgeId} already exists, skipping`
+                    );
+                    continue;
+                }
 
-            console.log("Creating knowledge ", knowledgeId);
-            await createRAGTweetKnowledge(pool, {
-                id: knowledgeId,
-                agentId: agent.agentId,
-                twitterName: twitterName,
-                content: {
-                    text: item,
-                    metadata: {
-                        type: "direct",
+                await createRAGTweetKnowledge(pool, {
+                    id: knowledgeId,
+                    agentId: agent.agentId,
+                    twitterName: twitterName,
+                    content: {
+                        text: item,
+                        metadata: {
+                            type: "direct",
+                        },
                     },
-                },
-            });
+                });
+            }
         } catch (error) {
             elizaLogger.error("Error bootstraping tweet knowledge:", error);
         }
     };
 
-    // await bootstrapSmokeyRag();
+    await bootstrapSmokeyRag();
+
+    // directClient.app.get("/rag-tweet-knowledge", async (req, res) => {
+    //     try {
+    //         const { agentId, query, limit } = req.query;
+    //         if (!agentId || !query) {
+    //             res.status(400).json({
+    //                 error: "agentId and query are required",
+    //             });
+    //             return;
+    //         }
+
+    //         const pool = new pg.Pool({
+    //             connectionString: process.env.POSTGRES_URL,
+    //         });
+
+    //         const embedding = await embed(agent, query);
+    //         const results = await searchRagTweetKnowledge(pool, {
+    //             agentId: agentId as string,
+    //             embedding: new Float32Array(embedding),
+    //             match_threshold: 0.7,
+    //             match_count: limit ? parseInt(limit as string, 10) : 5,
+    //             searchText: query as string,
+    //         });
+
+    //         res.json({ results });
+    //     } catch (error) {
+    //         elizaLogger.error("Error querying RAG tweet knowledge:", error);
+    //         res.status(500).json({ error: error.message });
+    //     }
+    // });
+
+    // curl -g 'http://localhost:3000/search-rag-tweet-knowledge?topic="123"&limit=5&threshold=0.7'
+    directClient.app.get("/search-rag-tweet-knowledge", async (req, res) => {
+        try {
+            const { topic, limit, threshold } = req.query;
+
+            if (!topic) {
+                res.status(400).json({
+                    error: "topic string is required",
+                });
+                return;
+            }
+
+            if (typeof topic !== "string") {
+                res.status(400).json({
+                    error: "topic must be a string",
+                });
+                return;
+            }
+
+            const pool = new pg.Pool({
+                connectionString: process.env.POSTGRES_URL,
+            });
+
+            const processedTopic = preprocess(topic);
+            console.log("processedTopic", processedTopic);
+            const embedding = await embed(agent, processedTopic);
+
+            const results = await searchRagTweetKnowledge(pool, {
+                agentId: agent.agentId,
+                embedding: new Float32Array(embedding),
+                match_threshold: Number(threshold),
+                match_count: Number(limit),
+                searchText: processedTopic,
+            });
+
+            res.json({
+                results: results.map((r) => {
+                    return {
+                        text: r.content.text,
+                        similarity: r.similarity,
+                        score: r.score,
+                    };
+                }),
+            });
+        } catch (error) {
+            elizaLogger.error("Error querying RAG tweet knowledge:", error);
+            res.status(500).json({ error: error.message });
+        }
+    });
 
     let currentTopicIndex = 0;
 
@@ -566,6 +619,35 @@ export async function createCustomRoutes(
                 res.status(500).json({ error: "No topics found" });
                 return;
             }
+
+            // rag tweet knowledge to get relevant tweets of smokeythebera
+            const pool = new pg.Pool({
+                connectionString: process.env.POSTGRES_URL,
+            });
+
+            const processedTopic = preprocess(selectedTopic);
+
+            const embedding = await embed(agent, processedTopic);
+
+            const results = await searchRagTweetKnowledge(pool, {
+                agentId: agent.agentId,
+                embedding: new Float32Array(embedding),
+                match_threshold: 0.3,
+                match_count: 10,
+                searchText: processedTopic,
+            });
+
+            if (!results.length) {
+                elizaLogger.error("No rag tweet knowledge found for topic");
+                res.status(500).json({
+                    error: "No rag tweet knowledge found for topic",
+                });
+                return;
+            }
+
+            const tweetExamples = results.map((r) => r.content.text);
+
+            agent.character.postExamples = tweetExamples;
 
             const state = await composeState(
                 agent,
@@ -665,6 +747,7 @@ export async function createCustomRoutes(
                     tweet: cleanedContent,
                     topic: selectedTopic,
                     prompt: context,
+                    postExamples: agent.character.postExamples,
                 });
                 return;
             }
@@ -1211,3 +1294,28 @@ const formatKnowledge = (knowledge: KnowledgeItem[]) => {
         .map((knowledge) => `- ${knowledge.content.text}`)
         .join("\n");
 };
+
+function preprocess(content: string): string {
+    if (!content || typeof content !== "string") {
+        elizaLogger.warn("Invalid input for preprocessing");
+        return "";
+    }
+
+    return content
+        .replace(/```[\s\S]*?```/g, "")
+        .replace(/`.*?`/g, "")
+        .replace(/#{1,6}\s*(.*)/g, "$1")
+        .replace(/!\[(.*?)\]\(.*?\)/g, "$1")
+        .replace(/\[(.*?)\]\(.*?\)/g, "$1")
+        .replace(/(https?:\/\/)?(www\.)?([^\s]+\.[^\s]+)/g, "$3")
+        .replace(/<@[!&]?\d+>/g, "")
+        .replace(/<[^>]*>/g, "")
+        .replace(/^\s*[-*_]{3,}\s*$/gm, "")
+        .replace(/\/\*[\s\S]*?\*\//g, "")
+        .replace(/\/\/.*/g, "")
+        .replace(/\s+/g, " ")
+        .replace(/\n{3,}/g, "\n\n")
+        .replace(/[^a-zA-Z0-9\s\-_./:?=&]/g, "")
+        .trim()
+        .toLowerCase();
+}
